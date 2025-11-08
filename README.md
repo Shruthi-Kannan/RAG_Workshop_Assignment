@@ -51,7 +51,7 @@ Pull the model: ollama pull phi3:mini
 
 Install Python requirements: pip install -r requirements.txt
 
-Run the script: python RAG_Assignment_DL.ipynb
+Run the script: python RAG_Assignment_DL.py
 
 ## ✅ Test Questions:
 1. "What are some of the challenges in neural network optimization?" 
