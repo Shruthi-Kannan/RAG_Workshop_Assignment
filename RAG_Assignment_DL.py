@@ -1,0 +1,268 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+Converted from Jupyter Notebook: notebook.ipynb
+Conversion Date: 2025-11-08T09:31:14.883Z
+"""
+
+# ========================================================================
+# RAG WORKSHOP ASSIGNMENT - MODIFIED CODE
+# Topic: Deep Learning Research Papers
+# ========================================================================
+
+# ========================================================================
+# PART 1: IMPORTS AND SETUP
+# ========================================================================
+import os
+import sys
+from pathlib import Path
+
+# LangChain Document Loaders & Processing
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+# Vector Store and Embeddings
+from langchain_community.vectorstores import Chroma
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.llms import Ollama # Local LLM via Ollama
+
+# RAG Chain
+from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
+
+# ========================================================================
+# WORKSHOP ACTIVITY 1: DOCUMENT DISCOVERY
+# ========================================================================
+data_dir = "./data"
+pdf_files = [str(p) for p in Path(data_dir).rglob("*.pdf") if p.is_file()]
+
+print("="*60)
+print("RAG ASSIGNMENT SETUP: Deep Learning")
+print("="*60)
+
+if not pdf_files:
+    print(f"❌ ERROR: No PDFs found in {data_dir}. Please add your 5 Deep Learning PDFs.")
+    sys.exit(0)
+else:
+    print(f"✅ Found {len(pdf_files)} PDF(s) to process for Deep Learning topic.")
+    for f in pdf_files:
+        print(f" - {os.path.basename(f)}")
+
+
+# ========================================================================
+# WORKSHOP ACTIVITY 2: DOCUMENT LOADING AND PREPROCESSING
+# ========================================================================
+documents = []
+for file_path in pdf_files:
+    try:
+        loader = PyPDFLoader(file_path)
+        docs = loader.load()
+        for doc in docs:
+            doc.metadata["source"] = os.path.basename(file_path)
+        documents.extend(docs)
+    except Exception as e:
+        print(f"❌ Error loading {file_path}: {e}")
+
+print(f"\n📊 SUMMARY: Total pages loaded: {len(documents)}")
+
+# ========================================================================
+# PART 2 MODIFICATION: TEXT CHUNKING STRATEGY
+# Chosen Settings for Technical Papers: Larger chunks and overlap.
+# ========================================================================
+
+print("\n🔧 PART 2: Applying Modified Chunking Strategy (1200/200)")
+
+text_splitter = RecursiveCharacterTextSplitter(
+    # --- MODIFIED SETTINGS START ---
+    chunk_size=1200,       # Increased from 800 for better context retention in research papers
+    chunk_overlap=200,     # Increased from 150 to reduce information loss between chunks
+    # --- MODIFIED SETTINGS END ---
+    separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""]
+)
+
+texts = text_splitter.split_documents(documents)
+
+for i, text in enumerate(texts):
+    text.metadata["chunk_id"] = i
+    text.metadata["chunk_length"] = len(text.page_content)
+
+print(f"✅ Successfully split into {len(texts)} text chunks.")
+
+# ========================================================================
+# WORKSHOP ACTIVITY 4: EMBEDDINGS AND VECTOR STORE
+# ========================================================================
+print("\n🧠 Initializing Embedding Model and Vector Store...")
+embeddings = HuggingFaceEmbeddings(
+    model_name="all-MiniLM-L6-v2",
+    model_kwargs={'device': 'cpu'},
+    encode_kwargs={'normalize_embeddings': False}
+)
+
+db_path = "./chroma_deep_learning_db" 
+vectorstore = Chroma.from_documents(
+    documents=texts,
+    embedding=embeddings,
+    persist_directory=db_path
+)
+print(f"✅ Vector store created/updated in {db_path} with {vectorstore._collection.count()} chunks.")
+
+# ========================================================================
+# PART 3 MODIFICATION: RETRIEVAL CONFIGURATION
+# Chosen Settings: High K/Fetch_K, high diversity (low lambda_mult).
+# ========================================================================
+
+print("\n🔍 PART 3: Applying Modified Retrieval Configuration (MMR, k=7, lambda=0.3)")
+
+retriever = vectorstore.as_retriever(
+    search_type="mmr",
+    search_kwargs={
+        # --- MODIFIED SETTINGS START ---
+        "k": 7,             # Increased from 5 (More context for LLM)
+        "fetch_k": 15,      # Increased from 10 (Larger pool for MMR selection)
+        "lambda_mult": 0.3  # Decreased from 0.7 (Prioritize diversity, key for synthesis questions)
+        # --- MODIFIED SETTINGS END ---
+    }
+)
+
+print(f"   - Documents returned (k): {retriever.search_kwargs['k']}")
+print(f"   - Relevance vs Diversity balance (lambda_mult): {retriever.search_kwargs['lambda_mult']}")
+
+# ========================================================================
+# PART 6 & 7: LLM, PROMPT, AND CHAIN SETUP
+# ========================================================================
+try:
+    llm = Ollama(
+        model="phi3:mini",
+        temperature=0.2,
+        num_thread=2,
+    )
+    # Test LLM connection
+    llm.invoke("Test response: What is 2+2?")
+except Exception as e:
+    print(f"\n❌ LLM Connection Failed: {e}. Ensure Ollama is running.")
+    sys.exit(1)
+
+
+prompt_template = """
+You are a precise document analyst. Your task is to answer questions STRICTLY based on the provided context.
+
+CRITICAL INSTRUCTIONS:
+1. ONLY use information explicitly stated in the context below
+2. If the context doesn't contain the answer, respond: "The provided documents do not contain information to answer this question."
+3. Always cite which document/source your answer comes from
+4. Do not make inferences beyond what is directly stated
+5. If multiple sources contradict each other, mention the contradiction
+6. Use exact quotes when possible, enclosed in quotation marks
+7. For factual questions (like definitions, equations, or parameters), scan ALL context carefully
+
+Context Documents:
+{context}
+
+Question: {question}
+Requirements for your answer:
+- Start with the most relevant source
+- Use direct quotes where applicable
+- Clearly separate facts from different sources
+- Look for keywords related to the question (e.g., algorithm, loss function, architecture, parameter)
+- End with source citations
+
+Answer:
+"""
+
+PROMPT = PromptTemplate(
+    template=prompt_template, 
+    input_variables=["context", "question"]
+)
+
+qa_chain = RetrievalQA.from_chain_type(
+    llm=llm,
+    chain_type="stuff",
+    retriever=retriever,
+    chain_type_kwargs={
+        "prompt": PROMPT,
+        "document_separator": "\n\n--- SOURCE DOCUMENT ---\n\n"
+    },
+    return_source_documents=True,
+    verbose=False
+)
+
+print("✅ RAG chain assembled successfully!")
+
+# ========================================================================
+# WORKSHOP ACTIVITY 9: ANSWER VALIDATION SYSTEM
+# (Keeping original validation functions for assignment requirements)
+# ========================================================================
+
+def validate_answer(answer, source_docs):
+    answer_lower = answer.lower()
+    hallucination_phrases = [
+        "i think", "probably", "likely", "it seems", "perhaps", 
+        "generally speaking", "typically", "usually", "in most cases"
+    ]
+    confidence_score = 1.0
+    warnings = []
+    
+    for phrase in hallucination_phrases:
+        if phrase in answer_lower:
+            confidence_score -= 0.2
+            warnings.append(f"Uncertain language detected: '{phrase}'")
+    
+    has_citations = any(doc.metadata['source'].lower() in answer_lower for doc in source_docs)
+    if not has_citations and "do not contain information" not in answer_lower:
+        confidence_score -= 0.3
+        warnings.append("Answer does not explicitly reference source documents")
+    
+    return max(0.0, confidence_score), warnings
+
+def ask_question_with_validation(question):
+    print(f"\n🤔 Question: {question}")
+    print("🔍 Retrieving relevant information...")
+    
+    result = qa_chain.invoke({"query": question})
+    answer = result["result"]
+    source_docs = result["source_documents"]
+    
+    confidence, warnings = validate_answer(answer, source_docs)
+    
+    print("\n📝 Answer:")
+    print("="*50)
+    print(answer)
+    
+    print(f"\n📊 Quality Assessment: Confidence Score: {confidence:.2f}/1.0")
+    if warnings:
+        print("⚠️  Quality Warnings:")
+        for warning in warnings:
+            print(f"   • {warning}")
+    
+    print(f"\n📚 Retrieved Sources ({len(source_docs)} documents):")
+    print("-" * 60)
+    
+    for i, doc in enumerate(source_docs):
+        print(f"{i+1}. Source: {doc.metadata.get('source', 'Unknown')}")
+        print(f"   Content: {doc.page_content[:200]}...")
+        print()
+    
+    return result, confidence, warnings
+
+# ========================================================================
+# WORKSHOP ACTIVITY 10: HANDS-ON TESTING - Running Test Questions
+# ========================================================================
+
+print("\n" + "="*80)
+print("WORKSHOP ASSIGNMENT DEMO: RUNNING TEST QUERIES")
+print("="*80)
+
+# PART 3 Submission Requirement: Test with 2 questions showing it works better
+print("\n--- TEST QUESTION 1 (Factual Retrieval - Model Architecture) ---")
+# Example question for a Deep Learning paper:
+test_q1 = "What are some of the challenges in neural network optimization?" 
+ask_question_with_validation(test_q1)
+
+print("\n" + "="*80)
+print("--- TEST QUESTION 2 (Synthesis/MMR Test - Loss Functions) ---")
+# Example question requiring retrieval from multiple sources (MMR test):
+test_q2 = "Explain Adversarial Training in simple terms."
+ask_question_with_validation(test_q2)
+
+print("\n" + "="*80)
+print("🚀 ASSIGNMENT CODE COMPLETE.")
